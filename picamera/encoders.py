@@ -38,6 +38,7 @@ from __future__ import (
 str = type('')
 
 import datetime
+import numpy as np
 import threading
 import warnings
 import ctypes as ct
@@ -177,7 +178,11 @@ class PiEncoder(object):
         self.output_port = None
         self.outputs_lock = threading.Lock() # protects access to self.outputs
         self.outputs = {}
+        self.i = 0
         self.exception = None
+
+
+
         self.event = threading.Event()
         try:
             if parent and parent.closed:
@@ -984,6 +989,7 @@ class PiImageEncoder(PiEncoder):
         Extends the base :meth:`~PiEncoder._create_encoder` implementation to
         configure the image encoder for JPEG, PNG, etc.
         """
+        print('Created a PiImageEncoder')
         super(PiImageEncoder, self)._create_encoder(format)
 
         try:
@@ -1052,8 +1058,17 @@ class PiMultiImageEncoder(PiImageEncoder):
     """
 
     def _open_output(self, outputs, key=PiVideoFrameType.frame):
-        self._output_iter = iter(outputs)
+        # self._output_iter = iter(outputs)
+        self._output_iter = outputs
         self._next_output(key)
+    
+    def _give_next_output(self):
+        # print(self.i)
+        # self.i += 1 #need to define this somewhere in parent class
+        # if self.i > 42:
+            # self.event.set()
+        return next(self._output_iter)#np.empty((240 * 320 * 3,), dtype=np.uint8)
+        
 
     def _next_output(self, key=PiVideoFrameType.frame):
         """
@@ -1061,12 +1076,54 @@ class PiMultiImageEncoder(PiImageEncoder):
         :meth:`~PiEncoder.start`.
         """
         self._close_output(key)
-        super(PiMultiImageEncoder, self)._open_output(next(self._output_iter), key)
-
+        # super(PiMultiImageEncoder, self)._open_output(next(self._output_iter), key)
+        super(PiMultiImageEncoder, self)._open_output(self._give_next_output(), key)
+        
     def _callback_write(self, buf, key=PiVideoFrameType.frame):
         try:
             if (
                 super(PiMultiImageEncoder, self)._callback_write(buf, key)
+                ) or bool(
+                buf.flags & (
+                    mmal.MMAL_BUFFER_HEADER_FLAG_FRAME_END |
+                    mmal.MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED)
+                ):
+                self._next_output(key)
+            return False
+        except StopIteration:
+            return True
+
+class PiMultiImageInterruptEncoder(PiImageEncoder):
+    """
+    Encoder for multiple image capture with interruptable iterator.
+
+    This class extends :class:`PiImageEncoder` to handle an iterable of outputs
+    instead of a single output. The :meth:`~PiEncoder._callback_write` method
+    is extended to terminate capture when the iterable is exhausted, while
+    :meth:`PiEncoder._open_output` is overridden to begin iteration and rely
+    on the new :meth:`_next_output` method to advance output to the next item
+    in the iterable as given by :meth:`_give_next_output`
+    """
+
+    def _open_output(self, outputs, key=PiVideoFrameType.frame):
+        self._output_iter = outputs # outputs is an interable
+        self._next_output(key)
+    
+    def _give_next_output(self):
+        return next(self._output_iter)#np.empty((240 * 320 * 3,), dtype=np.uint8)
+
+    def _next_output(self, key=PiVideoFrameType.frame):
+        """
+        This method moves output to the next item from the iterable passed to
+        :meth:`~PiEncoder.start`.
+        """
+        self._close_output(key)
+        super(PiMultiImageInterruptEncoder, self)._open_output(self._give_next_output(), key)
+        
+    def _callback_write(self, buf, key=PiVideoFrameType.frame):
+        try:
+            if (
+                super(PiMultiImageInterruptEncoder, self)._callback_write(buf, key)
                 ) or bool(
                 buf.flags & (
                     mmal.MMAL_BUFFER_HEADER_FLAG_FRAME_END |
@@ -1216,3 +1273,22 @@ class PiRawMultiImageEncoder(PiMultiImageEncoder, PiRawImageMixin):
         super(PiRawMultiImageEncoder, self)._next_output(key)
         self._image_size = self._frame_size
 
+class PiRawMultiImageInterruptEncoder(PiMultiImageInterruptEncoder, PiRawImageMixin):
+    """
+    Multiple image encoder for unencoded capture.
+
+    This class is a derivative of :class:`PiMultiImageEncoder` and the
+    :class:`PiRawImageMixin` class intended for use with
+    :meth:`~PiCamera.capture_sequence` when it is called with an unencoded
+    image format.
+
+    .. warning::
+
+        This class creates an inheritance diamond. Take care to determine the
+        MRO of super-class calls.
+    """
+    def _next_output(self, key=PiVideoFrameType.frame):
+        # self.event.set()
+        # print('GNE')
+        super(PiRawMultiImageInterruptEncoder, self)._next_output(key)
+        self._image_size = self._frame_size

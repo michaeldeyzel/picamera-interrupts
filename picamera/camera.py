@@ -68,6 +68,8 @@ from .encoders import (
     PiRawMultiImageEncoder,
     PiCookedOneImageEncoder,
     PiCookedMultiImageEncoder,
+    PiRawMultiImageInterruptEncoder,
+    PiMultiImageInterruptEncoder
     )
 from .renderers import (
     PiPreviewRenderer,
@@ -857,6 +859,25 @@ class PiCamera(object):
         encoder_class = (
                 PiRawOneImageEncoder if format in self.RAW_FORMATS else
                 PiCookedOneImageEncoder)
+        return encoder_class(
+                self, camera_port, output_port, format, resize, **options)
+
+    def _get_images_interrupt_encoder(
+            self, camera_port, output_port, format, resize, **options):
+        """
+        Construct a multi-image encoder for the requested parameters and runs indefinitely until the iterator is interrupted
+
+        This method is largely equivalent to :meth:`_get_images_encoder` with
+        the exception that the encoder returned should expect to be passed an
+        iterable of outputs to its :meth:`~PiEncoder.start` method, rather than
+        a single output object. This method is called by the
+        :meth:`capture_sequence` method.
+
+        All parameters are the same as in :meth:`_get_images_encoder`. Please
+        refer to the documentation for that method for further information.
+        """
+        encoder_class = (
+                PiRawMultiImageInterruptEncoder
         return encoder_class(
                 self, camera_port, output_port, format, resize, **options)
 
@@ -1696,6 +1717,116 @@ class PiCamera(object):
             format = self._get_image_format('', format)
             if use_video_port:
                 encoder = self._get_images_encoder(
+                        camera_port, output_port, format, resize, **options)
+                self._encoders[splitter_port] = encoder
+            else:
+                encoder = self._get_image_encoder(
+                        camera_port, output_port, format, resize, **options)
+        try:
+            if use_video_port:
+                encoder.start(outputs)
+                encoder.wait()
+            else:
+                if burst:
+                    camera_port.params[mmal.MMAL_PARAMETER_CAMERA_BURST_CAPTURE] = True
+                try:
+                    for output in outputs:
+                        if bayer:
+                            camera_port.params[mmal.MMAL_PARAMETER_ENABLE_RAW_CAPTURE] = True
+                        encoder.start(output)
+                        if not encoder.wait(self.CAPTURE_TIMEOUT):
+                            raise PiCameraRuntimeError(
+                                'Timed out waiting for capture to end')
+                finally:
+                    if burst:
+                        camera_port.params[mmal.MMAL_PARAMETER_CAMERA_BURST_CAPTURE] = False
+        finally:
+            encoder.close()
+            with self._encoders_lock:
+                if use_video_port:
+                    del self._encoders[splitter_port]
+
+    def capture_until_interrupted(
+            self, outputs, format='jpeg', use_video_port=False, resize=None,
+            splitter_port=0, burst=False, bayer=False, **options):
+        """
+        Capture a sequence of consecutive images from the camera indefinately until the iterable in outputs generates an interrupt.
+
+        This method accepts a sequence or iterator of *outputs* each of which
+        must either be a string specifying a filename for output, or a
+        file-like object with a ``write`` method, or a writeable buffer object.
+        For each item in the sequence or iterator of outputs, the camera
+        captures a single image as fast as it can.
+
+        The *format*, *use_video_port*, *splitter_port*, *resize*, and
+        *options* parameters are the same as in :meth:`capture`, but *format*
+        defaults to ``'jpeg'``.  The format is **not** derived from the
+        filenames in *outputs* by this method.
+
+        If *use_video_port* is ``False`` (the default), the *burst* parameter
+        can be used to make still port captures faster.  Specifically, this
+        prevents the preview from switching resolutions between captures which
+        significantly speeds up consecutive captures from the still port. The
+        downside is that this mode is currently has several bugs; the major
+        issue is that if captures are performed too quickly some frames will
+        come back severely underexposed. It is recommended that users avoid the
+        *burst* parameter unless they absolutely require it and are prepared to
+        work around such issues.
+
+        For example, to capture 3 consecutive images::
+
+            import time
+            import picamera
+            with picamera.PiCamera() as camera:
+                camera.start_preview()
+                time.sleep(2)
+                camera.capture_sequence([
+                    'image1.jpg',
+                    'image2.jpg',
+                    'image3.jpg',
+                    ])
+                camera.stop_preview()
+
+        If you wish to capture a large number of images, a list comprehension
+        or generator expression can be used to construct the list of filenames
+        to use::
+
+            import time
+            import picamera
+            with picamera.PiCamera() as camera:
+                camera.start_preview()
+                time.sleep(2)
+                camera.capture_sequence([
+                    'image%02d.jpg' % i
+                    for i in range(100)
+                    ])
+                camera.stop_preview()
+
+        More complex effects can be obtained by using a generator function to
+        provide the filenames or output objects.
+
+        .. versionchanged:: 1.0
+            The *resize* parameter was added, and raw capture formats can now
+            be specified directly
+
+        .. versionchanged:: 1.3
+            The *splitter_port* parameter was added
+
+        .. versionchanged:: 1.11
+            Support for buffer outputs was added.
+        """
+        if use_video_port:
+            if burst:
+                raise PiCameraValueError(
+                    'burst is only valid with still port captures')
+            if bayer:
+                raise PiCameraValueError(
+                    'bayer is only valid with still port captures')
+        with self._encoders_lock:
+            camera_port, output_port = self._get_ports(use_video_port, splitter_port)
+            format = self._get_image_format('', format)
+            if use_video_port:
+                encoder = self._get_images_interrupt_encoder(
                         camera_port, output_port, format, resize, **options)
                 self._encoders[splitter_port] = encoder
             else:

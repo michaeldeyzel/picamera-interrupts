@@ -876,8 +876,7 @@ class PiCamera(object):
         All parameters are the same as in :meth:`_get_images_encoder`. Please
         refer to the documentation for that method for further information.
         """
-        encoder_class = (
-                PiRawMultiImageInterruptEncoder
+        encoder_class = PiRawMultiImageInterruptEncoder
         return encoder_class(
                 self, camera_port, output_port, format, resize, **options)
 
